@@ -4,7 +4,7 @@
 # Imported from https://github.com/bmax121/APatch/blob/main/app/src/main/assets/boot_patch.sh
 #######################################################################################
 #
-# Usage: boot_patch.sh <superkey> <bootimage> [ARGS_PASS_TO_KPTOOLS]
+# Usage: boot_patch.sh <bootimage> <true|false> [ARGS_PASS_TO_KPTOOLS]
 #
 # This script should be placed in a directory with the following files:
 #
@@ -26,9 +26,12 @@ ARCH=$(getprop ro.product.cpu.abi)
 # Load utility functions
 . "$MODPATH/util_functions.sh"
 
+[ "$#" -ge 1 ] || { echo "! Boot image is required" >&2; exit 1; }
 BOOTIMAGE=$1
-FLASH_TO_DEVICE=$2
-shift 2
+shift
+FLASH_TO_DEVICE=${1:-false}
+[ "$#" -eq 0 ] || shift
+case "$FLASH_TO_DEVICE" in true|false) ;; *) echo "! Invalid flash mode" >&2; exit 1;; esac
 
 [ -e "$BOOTIMAGE" ] || { >&2 echo "! $BOOTIMAGE does not exist"; exit 1; }
 
@@ -36,14 +39,14 @@ shift 2
 command -v magiskboot >/dev/null 2>&1 || { >&2 echo "! Command magiskboot not found"; exit 1; }
 command -v kptools >/dev/null 2>&1 || { >&2 echo "! Command kptools not found"; exit 1; }
 
-if [ ! -f kernel ]; then
+# Re-read the requested boot image even after a failed/retried operation.
+rm -f kernel kernel.ori new-boot.img
 echo "- Unpacking boot image"
 magiskboot unpack "$BOOTIMAGE" >/dev/null 2>&1
   if [ $? -ne 0 ]; then
     >&2 echo "! Unpack error: $?"
     exit 1
   fi
-fi
 
 if kptools -i kernel -f | grep -q "CONFIG_KPM=y"; then
 	echo "! Patcher has Aborted."
@@ -52,19 +55,19 @@ if kptools -i kernel -f | grep -q "CONFIG_KPM=y"; then
 	exit 1
 fi
 
-if [ ! $(kptools -i kernel -f | grep CONFIG_KALLSYMS_ALL=y) ]; then
+if ! kptools -i kernel -f | grep -q "^CONFIG_KALLSYMS_ALL=y$"; then
 	echo "! Patcher has Aborted."
 	echo "! KPatch-Next requires CONFIG_KALLSYMS_ALL to be Enabled."
 	echo "! But your kernel seems NOT enabled it."
 	exit 1
 fi
 
-if [  $(kptools -i kernel -l | grep patched=false) ]; then
+if kptools -i kernel -l | grep -q "^patched=false$"; then
 	echo "- Backing boot.img "
-  cp "$BOOTIMAGE" "ori.img" >/dev/null 2>&1
+  cp "$BOOTIMAGE" "ori.img" || { echo "! Boot backup failed" >&2; exit 1; }
 fi
 
-mv kernel kernel.ori
+mv kernel kernel.ori || exit 1
 
 echo "- Patching kernel"
 
@@ -86,21 +89,21 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-if [ "$FLASH_TO_DEVICE" = "true" ]; then
-  # flash
-  if [ -b "$BOOTIMAGE" ] || [ -c "$BOOTIMAGE" ] && [ -f "new-boot.img" ]; then
-    echo "- Flashing new boot image"
-    flash_image new-boot.img "$BOOTIMAGE"
-    if [ $? -ne 0 ]; then
-      >&2 echo "! Flash error: $?"
-      save_image_to_storage "new-boot.img"
-      exit 1
-    fi
-  fi
+[ -s new-boot.img ] || { echo "! Repack produced no boot image" >&2; exit 1; }
 
+if [ "$FLASH_TO_DEVICE" = "true" ]; then
+  if [ ! -b "$BOOTIMAGE" ] && [ ! -c "$BOOTIMAGE" ]; then
+    echo "! Refusing to flash a non-device target; choose image export" >&2
+    exit 1
+  fi
+  echo "- Flashing new boot image"
+  if ! flash_image new-boot.img "$BOOTIMAGE"; then
+    echo "! Flash failed" >&2
+    save_image_to_storage "new-boot.img"
+    exit 1
+  fi
   echo "- Successfully Flashed!"
 else
-  save_image_to_storage "new-boot.img"
+  save_image_to_storage "new-boot.img" || exit 1
   echo "- Successfully Patched!"
 fi
-

@@ -9,7 +9,7 @@ let clickCount = 0;
 let lastClickTime = 0;
 
 async function getKpmInfo(path) {
-    const result = await exec(`kptools -l -M "${path}"`, { env: { PATH: `${modDir}/bin` } });
+    const result = await exec(`kptools -l -M ${escapeShell(path)}`, { env: { PATH: `${modDir}/bin` } });
     if (import.meta.env.DEV) { // vite debug
         result.stdout = 'name=Test Module\nversion=1.0.0\ndescription=This is a test module\nauthor=KOWX712\nlicense=MIT\nargs=test';
     }
@@ -50,7 +50,7 @@ async function getKpmList() {
     const modules = listResult.stdout.trim().split('\n').filter(line => line.trim());
 
     const modulePromises = modules.map(async (moduleName) => {
-        const infoResult = await exec(`kpatch kpm info "${moduleName}"`, { env: { PATH: `${modDir}/bin` } });
+        const infoResult = await exec(`kpatch kpm info ${escapeShell(moduleName)}`, { env: { PATH: `${modDir}/bin` } });
         const infoLines = infoResult.stdout.trim().split('\n');
 
         const moduleInfo = {};
@@ -67,22 +67,27 @@ async function getKpmList() {
 }
 
 async function controlModule(moduleName, action) {
-    const result = await exec(`kpatch kpm ctl0 "${moduleName}" ${escapeShell(action)}`, { env: { PATH: `${modDir}/bin` } });
+    const result = await exec(`kpatch kpm ctl0 ${escapeShell(moduleName)} ${escapeShell(action)}`, { env: { PATH: `${modDir}/bin` } });
     toast(result.errno === 0 ? result.stdout : result.stderr);
 }
 
 function forgetModule(moduleName) {
-    exec(`rm -f "${persistDir}/kpm/${moduleName}.kpm"`);
+    if (!isSafeModuleName(moduleName)) return;
+    return exec(`rm -f ${escapeShell(`${persistDir}/kpm/${moduleName}.kpm`)}`);
+}
+
+function isSafeModuleName(name) {
+    return typeof name === 'string' && name.length > 0 && !/[\/\\\0]/.test(name);
 }
 
 async function unloadModule(moduleName) {
-    forgetModule(moduleName);
-    const result = await exec(`kpatch kpm unload "${moduleName}"`, { env: { PATH: `${modDir}/bin` } });
+    const result = await exec(`kpatch kpm unload ${escapeShell(moduleName)}`, { env: { PATH: `${modDir}/bin` } });
+    if (result.errno === 0) await forgetModule(moduleName);
     return result.errno === 0;
 }
 
 async function loadModule(modulePath) {
-    const result = await exec(`kpatch kpm load "${modulePath}"`, { env: { PATH: `${modDir}/bin` } });
+    const result = await exec(`kpatch kpm load ${escapeShell(modulePath)}`, { env: { PATH: `${modDir}/bin` } });
     return result.errno === 0;
 }
 
@@ -336,47 +341,47 @@ async function uploadAndLoadModule() {
     const loadBtn = document.getElementById('load');
     handleFileUpload('.kpm', 'kpm-list', async (file, onProgress, signal) => {
         loadBtn.classList.add('hide');
-        const tmpPath = `${modDir}/tmp/${file.name}`;
+        // Keep uploads separate from boot patching and from other uploads.
+        const uploadDir = `${modDir}/tmp/kpm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        const tmpPath = `${uploadDir}/module.kpm`;
         try {
-            await exec(`mkdir -p ${modDir}/tmp && rm -rf ${modDir}/tmp/*`);
+            await exec(`mkdir -p ${escapeShell(uploadDir)}`);
             await uploadFile(file, tmpPath, onProgress, signal);
             const info = await getKpmInfo(tmpPath);
-            if (info && info.name) {
+            if (info && isSafeModuleName(info.name)) {
                 const dialog = document.getElementById('load-dialog');
                 dialog.querySelector('#load-module-msg').textContent = getString('msg_module_loaded', info.name);
                 const checkbox = dialog.querySelector('md-checkbox');
                 checkbox.checked = false;
 
-                dialog.querySelector('.cancel').onclick = () => {
+                dialog.querySelector('.cancel').onclick = async () => {
                     dialog.close();
-                    exec(`rm -rf ${modDir}/tmp`);
+                    await exec(`rm -rf ${escapeShell(uploadDir)}`);
                 };
 
                 dialog.querySelector('.confirm').onclick = async () => {
-                    const success = await loadModule(`${modDir}/tmp/${file.name}`);
+                    const success = await loadModule(tmpPath);
                     if (success) {
                         toast(getString('msg_successfully_loaded', info.name));
                         refreshKpmList();
                         if (!checkbox.checked) { // Save module to load on boot automatically
-                            exec(`
-                                mkdir -p ${persistDir}/kpm
-                                cp -f "${modDir}/tmp/${file.name}" "${persistDir}/kpm/${info.name}.kpm"
-                            `);
+                            const saved = await exec(`mkdir -p ${persistDir}/kpm && cp -f ${escapeShell(tmpPath)} ${escapeShell(`${persistDir}/kpm/${info.name}.kpm`)}`);
+                            if (saved.errno !== 0) toast(getString('msg_error', saved.stderr));
                         }
                     } else {
                         toast(getString('msg_failed_load_module', info.name));
                     }
-                    exec(`rm -rf ${modDir}/tmp`);
+                    await exec(`rm -rf ${escapeShell(uploadDir)}`);
                     dialog.close();
                 };
 
                 dialog.show();
             } else {
                 toast(getString('msg_failed_get_module_info'));
-                exec(`rm -rf ${modDir}/tmp`);
+                await exec(`rm -rf ${escapeShell(uploadDir)}`);
             }
         } catch (e) {
-            exec(`rm -rf ${modDir}/tmp`);
+            await exec(`rm -rf ${escapeShell(uploadDir)}`);
             throw e;
         } finally {
             loadBtn.classList.remove('hide');

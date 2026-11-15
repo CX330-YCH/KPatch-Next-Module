@@ -253,27 +253,29 @@ find_boot_image() {
 }
 
 flash_image() {
+  [ -s "$1" ] || return 1
   local CMD1
   case "$1" in
     *.gz) CMD1="gzip -d < '$1' 2>/dev/null";;
     *)    CMD1="cat '$1'";;
   esac
   if [ -b "$2" ]; then {
-      local img_sz=$(stat -c '%s' "$1")
-      local blk_sz=$(blockdev --getsize64 "$2")
-      local blk_bs=$(blockdev --getbsz "$2")
+      local img_sz blk_sz blk_bs blk_ro
+      img_sz=$(stat -c '%s' "$1") || return 1
+      blk_sz=$(blockdev --getsize64 "$2") || return 1
+      blk_bs=$(blockdev --getbsz "$2") || return 1
       [ "$img_sz" -gt "$blk_sz" ] && return 1
-      blockdev --setrw "$2"
-      local blk_ro=$(blockdev --getro "$2")
+      blockdev --setrw "$2" || return 2
+      blk_ro=$(blockdev --getro "$2") || return 2
       [ "$blk_ro" -eq 1 ] && return 2
-      eval "$CMD1" | dd of="$2" bs="$blk_bs" iflag=fullblock conv=notrunc,fsync 2>/dev/null
-      sync
+      eval "$CMD1" | dd of="$2" bs="$blk_bs" iflag=fullblock conv=notrunc,fsync 2>/dev/null || return 1
+      sync || return 1
   } elif [ -c "$2" ]; then {
-      flash_eraseall "$2" >&2
-      eval "$CMD1" | nandwrite -p "$2" - >&2
+      flash_eraseall "$2" >&2 || return 1
+      eval "$CMD1" | nandwrite -p "$2" - >&2 || return 1
   } else {
       echo "- Not block or char device, storing image"
-      eval "$CMD1" > "$2" 2>/dev/null
+      eval "$CMD1" > "$2" 2>/dev/null || return 1
   } fi
   return 0
 }
@@ -284,7 +286,7 @@ save_image_to_storage() {
   local FILENAME="kpatch_next_patched_$DATE.img"
   local OUT="/storage/emulated/0/Download/$FILENAME"
 
-  cp -f "$IMAGE" "$OUT"
+  cp -f "$IMAGE" "$OUT" || { echo "! Failed to save image to $OUT" >&2; return 1; }
   echo "- Patched image saved to $OUT"
 }
 

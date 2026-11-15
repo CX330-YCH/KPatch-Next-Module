@@ -78,7 +78,7 @@ async function getKpimgInfo() {
 
 function extractBootimg(bootDev) {
     const child = spawn('magiskboot', ['unpack', bootDev], {
-        cwd: `${modDir}/tmp`,
+        cwd: `${modDir}/tmp/boot`,
         env: { PATH: `${modDir}/bin:/data/adb/ksu/bin:/data/adb/magisk:$PATH` }
     });
     child.on('exit', () => {
@@ -95,8 +95,8 @@ async function parseBootimg() {
 
     let stdout = '', stderr = '';
     const result = spawn('kptools', ['-l', '-i', 'kernel'], {
-        cwd: `${modDir}/tmp`,
-        env: { PATH: `${modDir}/bin:${modDir}/tmp:$PATH` }
+        cwd: `${modDir}/tmp/boot`,
+        env: { PATH: `${modDir}/bin:${modDir}/tmp/boot:$PATH` }
     });
 
     result.stdout.on('data', (data) => stdout += data + '\n');
@@ -160,7 +160,7 @@ async function extractAndParseBootimg() {
     }
 
     // Prepare work directory
-    const prepare = spawn(`mkdir -p ${modDir}/tmp && rm -rf ${modDir}/tmp/* && cp ${modDir}/bin/kpimg ${modDir}/tmp/`);
+    const prepare = spawn(`mkdir -p ${modDir}/tmp/boot && rm -rf ${modDir}/tmp/boot/* && cp ${modDir}/bin/kpimg ${modDir}/tmp/boot/`);
     await new Promise((resolve) => {
         prepare.on('exit', () => resolve());
     });
@@ -287,7 +287,7 @@ async function embedKPM() {
 
         // Generate random filename
         const randName = Math.random().toString(36).substring(7) + '.kpm';
-        const tmpPath = `${modDir}/tmp/${randName}`;
+        const tmpPath = `${modDir}/tmp/boot/${randName}`;
 
         try {
             await uploadFile(file, tmpPath, onProgress, signal);
@@ -300,7 +300,7 @@ async function embedKPM() {
         }
 
         const result = await exec(`kptools -l -M "${randName}"`, {
-            cwd: `${modDir}/tmp`,
+            cwd: `${modDir}/tmp/boot`,
             env: { PATH: `${modDir}/bin:$PATH` }
         });
 
@@ -355,7 +355,7 @@ function patch(type) {
 
         // New kpm
         newExtras.forEach(extra => {
-            args.push('-M', `${modDir}/tmp/${extra.fileName}`);
+            args.push('-M', `${modDir}/tmp/boot/${extra.fileName}`);
             if (extra.args) args.push('-A', escapeShell(extra.args));
             if (extra.event) args.push('-V', extra.event);
             args.push('-T', 'kpm');
@@ -370,14 +370,14 @@ function patch(type) {
         });
     } else {
         // Unpatch logic
-        args.push(`${modDir}/patch/boot_unpatch.sh`, bootDev);
+        args.push(`${modDir}/patch/boot_unpatch.sh`, bootDev, flashToDevice.selected ? 'true' : 'false');
     }
 
     const process = spawn(
         `busybox`,
         args,
         {
-            cwd: `${modDir}/tmp`,
+            cwd: `${modDir}/tmp/boot`,
             env: {
                 PATH: `${modDir}/bin:/data/adb/ksu/bin:/data/adb/magisk:$PATH`,
                 ASH_STANDALONE: '1'
@@ -388,13 +388,14 @@ function patch(type) {
     process.stderr.on('data', onOutput);
     process.on('exit', (code) => {
         if (code === 0) {
-            document.getElementById('reboot-fab').classList.remove('hide');
+            if (flashToDevice.selected) document.getElementById('reboot-fab').classList.remove('hide');
             bootSlot = '';
             bootDev = '';
             kimgInfo = { banner: '', patched: false };
             newExtras = [];
+            exec(`rm -rf ${modDir}/tmp/boot`);
         }
-        exec(`rm -rf ${modDir}/tmp`);
+        document.querySelector('.trailing-btn').style.display = '';
     });
 }
 

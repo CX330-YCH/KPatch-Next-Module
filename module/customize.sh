@@ -22,8 +22,11 @@ fi
 # backup module.prop
 cp "$MODPATH/module.prop" "$MODPATH/module.prop.bak"
 
-# Hot update webui, patch scripts and binaries
-rm -rf "$MODDIR/webroot"/* "$MODDIR/bin"/* "$MODDIR/patch"/*
-cp -Lrf "$MODPATH/webroot"/* "$MODDIR/webroot"
-cp -Lrf "$MODPATH/bin"/* "$MODDIR/bin"
-cp -Lrf "$MODPATH/patch"/* "$MODDIR/patch"
+# Only hot-update an existing installation. On first install the manager will
+# activate MODPATH at reboot; it may also install directly into MODDIR.
+if [ -f "$MODDIR/module.prop" ] && [ "$MODPATH" != "$MODDIR" ]; then
+    for dir in webroot bin patch; do
+        mkdir -p "$MODDIR/$dir" || abort "! Cannot prepare $dir"
+        cp -LRf "$MODPATH/$dir/." "$MODDIR/$dir/" || abort "! Cannot update $dir"
+    done
+fi

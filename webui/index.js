@@ -30,8 +30,7 @@ async function updateStatus() {
 }
 
 export function escapeShell(cmd) {
-    if (cmd === '' || cmd === null || cmd === undefined) return '""';
-    return '"' + cmd.replace(/[\\"$`'[\]]/g, '\\$&') + '"';
+    return "'" + String(cmd ?? '').replace(/'/g, "'\\''") + "'";
 }
 
 export async function initInfo() {

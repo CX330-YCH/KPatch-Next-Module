@@ -11,61 +11,40 @@ ARCH=$(getprop ro.product.cpu.abi)
 . "$MODPATH/util_functions.sh"
 
 BOOTIMAGE=$1
+FLASH_TO_DEVICE=${2:-false}
+case "$FLASH_TO_DEVICE" in true|false) ;; *) echo "! Invalid flash mode" >&2; exit 1;; esac
 
-[ -e "$BOOTIMAGE" ] || { echo "- $BOOTIMAGE does not exist!"; exit 1; }
+[ -e "$BOOTIMAGE" ] || { echo "! $BOOTIMAGE does not exist" >&2; exit 1; }
+command -v magiskboot >/dev/null 2>&1 || { echo "! magiskboot not found" >&2; exit 1; }
+command -v kptools >/dev/null 2>&1 || { echo "! kptools not found" >&2; exit 1; }
 
-echo "- Target image: $BOOTIMAGE"
-
-  # Check for dependencies
-command -v magiskboot >/dev/null 2>&1 || { echo "- Command magiskboot not found!"; exit 1; }
-command -v kptools >/dev/null 2>&1 || { echo "- Command kptools not found!"; exit 1; }
-
-if [ ! -f kernel ]; then
-echo "- Unpacking boot image"
-magiskboot unpack "$BOOTIMAGE" >/dev/null 2>&1
-if [ $? -ne 0 ]; then
-    >&2 echo "! Unpack error: $?"
-    exit 1
-  fi
-fi
-
-if [ ! $(kptools -i kernel -l | grep patched=false) ]; then
-	echo "- kernel has been patched "
-  if [ -f "new-boot.img" ]; then
-    echo "- found backup boot.img ,use it for recovery"
-  else
-    mv kernel kernel.ori
-    echo "- Unpatching kernel"
-    kptools -u --image kernel.ori --out kernel
-    if [ $? -ne 0 ]; then
-      >&2 echo "! Unpatch error: $?"
-      exit 1
-    fi
-    echo "- Repacking boot image"
-    magiskboot repack "$BOOTIMAGE" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      >&2 echo "! Repack error: $?"
-      exit 1
-    fi
-  fi
-
-else
-  echo "- no need unpatch"
+# Never restore an unrelated or previously patched new-boot.img.
+rm -f kernel kernel.ori new-boot.img
+magiskboot unpack "$BOOTIMAGE" || exit 1
+kernel_info=$(kptools -i kernel -l) || exit 1
+if ! printf '%s\n' "$kernel_info" | grep -q '^patched=true$'; then
+  echo "! Kernel is not patched" >&2
   exit 1
 fi
 
-if [ -f "new-boot.img" ]; then
-  echo "- Flashing boot image"
-  flash_image new-boot.img "$BOOTIMAGE"
+mv kernel kernel.ori || exit 1
+echo "- Unpatching kernel"
+kptools -u --image kernel.ori --out kernel || exit 1
+magiskboot repack "$BOOTIMAGE" || exit 1
+[ -s new-boot.img ] || { echo "! Repack produced no boot image" >&2; exit 1; }
 
-  if [ $? -ne 0 ]; then
-    >&2 echo "! Flash error: $?"
+if [ "$FLASH_TO_DEVICE" = "true" ]; then
+  if [ ! -b "$BOOTIMAGE" ] && [ ! -c "$BOOTIMAGE" ]; then
+    echo "! Refusing to flash a non-device target; choose image export" >&2
+    exit 1
+  fi
+  if ! flash_image new-boot.img "$BOOTIMAGE"; then
+    echo "! Flash failed" >&2
     save_image_to_storage "new-boot.img"
     exit 1
   fi
+  echo "- Successfully Flashed!"
+else
+  save_image_to_storage "new-boot.img" || exit 1
+  echo "- Successfully Unpatched!"
 fi
-
-echo "- Flash successful"
-
-# Reset any error code
-true

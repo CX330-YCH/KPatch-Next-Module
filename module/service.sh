@@ -4,16 +4,24 @@ MODDIR=${0%/*}
 KPNDIR="/data/adb/kp-next"
 PATH="$MODDIR/bin:$PATH"
 CONFIG="$KPNDIR/package_config"
-REHOOK="$(cat $KPNDIR/rehook)"
+REHOOK="$(cat "$KPNDIR/rehook" 2>/dev/null)"
 
 if [ -z "$(kpatch hello)" ]; then
     touch "$MODDIR/unresolved"
     exit 0
 fi
+rm -f "$MODDIR/unresolved"
 
-for kpm in $KPNDIR/kpm/*.kpm; do
+for kpm in "$KPNDIR"/kpm/*.kpm; do
     [ -s "$kpm" ] || continue
-    kpatch kpm load "$kpm" || rm -f "$kpm"
+    # A transient load failure must not delete the user's module. Disable its
+    # next automatic load while retaining the file for diagnosis/recovery.
+    if ! kpatch kpm load "$kpm"; then
+        disabled="$kpm.disabled"
+        while [ -e "$disabled" ]; do disabled="$disabled.disabled"; done
+        mv "$kpm" "$disabled"
+        echo "Failed to load $kpm; retained as $disabled" >&2
+    fi
 done
 
 if [ -n "$REHOOK" ]; then
