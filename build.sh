@@ -1,78 +1,59 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
 
-if [[ $1 == "clean" ]]; then
+if [[ ${1:-} == clean ]]; then
     rm -rf out module/bin module/webroot
     exit 0
 fi
-
-mkdir -p out module/bin module/webroot
-
-# Build WebUI
-cd webui
-pnpm build || pnpm install && pnpm build
-cd ..
-
-# Read versions from version.properties
 get_ver() {
-    [ -f version.properties ] && grep "^$1[[:space:]]*=" version.properties | cut -d'=' -f2 | xargs | sed 's/^"//;s/"$//'
+    awk -F= -v key="$1" '$1 == key {gsub(/"/, "", $2); print $2}' version.properties
 }
-
-download_assets() {
-    local repo="$1"
-    local tag="$2"
-    shift 2
-    local patterns=("$@")
-
-    local url="https://api.github.com/repos/$repo/releases"
-    if [[ "$tag" == "latest" ]]; then
-        url="$url/latest"
-    else
-        url="$url/tags/$tag"
-    fi
-
-    local release_json=$(curl -s "$url")
-    
-    for pattern in "${patterns[@]}"; do
-        local regex="${pattern//\*/.*}"
-        local asset_data=$(echo "$release_json" | jq -r ".assets[] | select(.name | test(\"$regex\")) | .name + \"\t\" + .browser_download_url" | head -n 1)
-        if [[ -z "$asset_data" ]]; then
-            echo "Error: Could not find asset matching $pattern in $repo $tag"
-            continue
-        fi
-        local asset_name=$(echo "$asset_data" | cut -f1)
-        local download_url=$(echo "$asset_data" | cut -f2)
-        echo "Downloading $asset_name from $download_url"
-        curl -L "$download_url" -o "module/bin/$asset_name"
-    done
+sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+for tool in gh curl unzip zip python3 shasum; do
+    command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }
+done
+core_repo=$(get_ver kpatch-repository)
+core_commit=$(get_ver kpatch-commit)
+core_run=$(get_ver kpatch-run)
+[[ $core_commit =~ ^[0-9a-f]{40}$ ]] || { echo 'Pin a full core commit in version.properties' >&2; exit 1; }
+mkdir -p out module/bin
+work=$(mktemp -d "${TMPDIR:-/tmp}/kpatch-build.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+assets=${KPATCH_ASSET_DIR:-$work/core}
+if [[ -z ${KPATCH_ASSET_DIR:-} ]]; then
+    gh run download "$core_run" --repo "$core_repo" --name "kpatch-next-core-$core_commit" --dir "$assets"
+fi
+[[ $(cat "$assets/SOURCE_COMMIT") == "$core_commit" ]] || { echo 'Core source commit mismatch' >&2; exit 1; }
+(cd "$assets" && shasum -a 256 -c SHA256SUMS)
+cp "$assets/kpatch-android" module/bin/kpatch
+cp "$assets/kptools-android" module/bin/kptools
+cp "$assets/kpimg-linux" module/bin/kpimg
+magisk_version=$(get_ver magiskboot)
+curl --fail --location --retry 3 "https://github.com/topjohnwu/Magisk/releases/download/$magisk_version/Magisk-$magisk_version.apk" --output "$work/magisk.apk"
+[[ $(sha256 "$work/magisk.apk") == "$(get_ver magisk-apk-sha256)" ]] || { echo 'Magisk APK checksum mismatch' >&2; exit 1; }
+unzip -p "$work/magisk.apk" lib/arm64-v8a/libmagiskboot.so > module/bin/magiskboot
+chmod 0755 module/bin/* module/*.sh module/patch/*.sh
+(
+    cd webui
+    "${PNPM_BIN:-pnpm}" install --frozen-lockfile
+    "${PNPM_BIN:-pnpm}" build
+)
+python3 tests/validate_package.py module
+version=$(sed -n 's/^version=//p' module/module.prop)
+commit=$(git rev-parse HEAD)
+python3 - "$core_repo" "$core_commit" "$core_run" "$commit" <<'PYINFO'
+import hashlib, json, pathlib, sys
+module = pathlib.Path('module')
+manifest = {
+    'core_repository': sys.argv[1], 'core_commit': sys.argv[2], 'core_build_run': sys.argv[3],
+    'module_commit': sys.argv[4],
+    'binaries': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((module/'bin').iterdir())},
 }
-
-VERSION_KPATCH_NEXT=$(get_ver "kpatch-next")
-VERSION_KPATCH_NEXT="${VERSION_KPATCH_NEXT:-latest}"
-VERSION_MAGISKBOOT=$(get_ver "magiskboot")
-VERSION_MAGISKBOOT="${VERSION_MAGISKBOOT:-latest}"
-
-# Fetch KPatch-Next binaries
-if [[ ! -f "module/bin/kpatch" || ! -f "module/bin/kpimg" || ! -f "module/bin/kptools" ]]; then
-    download_assets "KernelSU-Next/KPatch-Next" "$VERSION_KPATCH_NEXT" "kpatch-android" "kpimg-linux" "kptools-android"
-
-    mv module/bin/kpatch-android module/bin/kpatch
-    mv module/bin/kptools-android module/bin/kptools
-    mv module/bin/kpimg-linux module/bin/kpimg
-fi
-
-# Fetch magiskboot
-if [[ ! -f "module/bin/magiskboot" ]]; then
-    download_assets "topjohnwu/Magisk" "$VERSION_MAGISKBOOT" "Magisk*.apk"
-
-    APK=$(ls module/bin/Magisk*.apk | head -n 1)
-    unzip -p "$APK" 'lib/arm64-v8a/libmagiskboot.so' > "module/bin/magiskboot"
-    rm "$APK"
-fi
-
-# zip module
-commit_number=$(git rev-list --count HEAD)
-commit_hash=$(git rev-parse --short HEAD)
-
-cd module
-zip -r ../out/KPatch-Next-${commit_number}-${commit_hash}.zip .
-cd ..
+(module/'build-info.json').write_text(json.dumps(manifest, indent=2)+'\n')
+PYINFO
+archive="KPatch-Next-$version.zip"
+rm -f "out/$archive"
+(cd module && zip -q -r "../out/$archive" . -x 'tmp/*' 'ori.img' 'new-boot.img' '*.log' 'module.prop.bak')
+(cd out && shasum -a 256 "$archive" > "$archive.sha256")
+echo "Built: out/$archive"
